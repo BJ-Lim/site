@@ -156,18 +156,12 @@ class SubmissionAdmin(admin.ModelAdmin):
                            .only('points', 'case_points', 'case_total', 'problem__partial', 'problem__points'))
         for submission in submissions:
             submission.points = round(submission.case_points / submission.case_total * submission.problem.points
-                                      if submission.case_total else 0, 1)
+                                      if submission.case_total else 0, 3)
             if not submission.problem.partial and submission.points < submission.problem.points:
                 submission.points = 0
             submission.save()
 
-            if hasattr(submission, 'contest'):
-                contest = submission.contest
-                contest.points = round(submission.case_points / submission.case_total * contest.problem.points
-                                       if submission.case_total > 0 else 0, 1)
-                if not contest.problem.partial and contest.points < contest.problem.points:
-                    contest.points = 0
-                contest.save()
+        submission.recalculate_contest_submission()
 
         for profile in Profile.objects.filter(id__in=queryset.values_list('user_id', flat=True).distinct()):
             profile.calculate_points()

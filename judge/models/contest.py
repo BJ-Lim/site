@@ -4,7 +4,7 @@ from django.core.exceptions import ValidationError
 from django.core.urlresolvers import reverse
 from django.core.validators import MinValueValidator, RegexValidator
 from django.db import models
-from django.db.models import Max
+from django.db.models import Max, F, Q
 from django.utils import timezone
 from django.utils.functional import cached_property
 from django.utils.translation import ugettext_lazy as _, ugettext
@@ -95,6 +95,14 @@ class Contest(models.Model):
                                                'to join the contest. Leave it blank to disable.'))
     banned_users = models.ManyToManyField(Profile, verbose_name=_('personae non gratae'), blank=True,
                                           help_text=_('Bans the selected users from joining this contest.'))
+    time_bonus = models.IntegerField(default=0, help_text=_('Number of minutes to award an extra point for submitting before the contest end. '
+                                     'Leave as 0 for no time bonus.'), verbose_name='time bonus')
+    first_submission_bonus = models.IntegerField(default=0, help_text=_('Bonus points for fully solving on first submission.'),
+                                                 verbose_name='first try bonus')
+    freeze_submissions = models.BooleanField(default=False, help_text=_('Whether submission updates should be frozen. '
+                                             'If frozen, rejudging/rescoring will not propagate to related contest submissions until after this is unchecked.'),
+                                             verbose_name='freeze submissions')
+    
 
     def clean(self):
         if self.start_time >= self.end_time:
@@ -118,6 +126,7 @@ class Contest(models.Model):
         if self.hide_scoreboard and not self.is_in_contest(request) and self.end_time > timezone.now():
             return False
         return True
+
 
     @property
     def contest_window_length(self):
@@ -197,6 +206,7 @@ class Contest(models.Model):
             ('edit_all_contest', _('Edit all contests')),
             ('contest_rating', _('Rate contests')),
             ('contest_access_code', _('Contest access codes')),
+            ('contest_frozen_state', _('Change contest frozen state')),
         )
         verbose_name = _('contest')
         verbose_name_plural = _('contests')
@@ -212,8 +222,9 @@ class ContestParticipation(models.Model):
                                   help_text=_('0 means non-virtual, otherwise the n-th virtual participation'))
 
     def recalculate_score(self):
-        self.score = sum(map(itemgetter('points'),
-                             self.submissions.values('submission__problem').annotate(points=Max('points'))))
+        from django.db.models import F, FloatField
+        values = self.submissions.values('submission__problem').annotate(total=Max(F('points')+F('bonus'), output_field=FloatField()))
+        self.score = sum(map(itemgetter('total'), values))
         self.save()
         return self.score
 
@@ -264,10 +275,10 @@ class ContestParticipation(models.Model):
         cumtime = 0
         for problem in self.contest.contest_problems.all():
             solution = problem.submissions.filter(participation=self, points__gt=0) \
-                .values('submission__user_id').annotate(time=Max('submission__date'))
+                                          .annotate(best=Max('points')).filter(points=F('best')).aggregate(time=Max('submission__date'))
             if not solution:
                 continue
-            dt = solution[0]['time'] - self.start
+            dt = solution['time'] - self.start
             cumtime += dt.total_seconds()
         self.cumtime = cumtime
         self.save()
@@ -317,6 +328,10 @@ class ContestSubmission(models.Model):
     is_pretest = models.BooleanField(verbose_name=_('is pretested'),
                                      help_text=_('Whether this submission was ran only on pretests.'),
                                      default=False)
+    bonus = models.IntegerField(default=0, verbose_name=_('bonus'))
+    updated_frozen = models.BooleanField(verbose_name=_('updated while frozen'),
+                                         help_text=_('Whether this submission was rejudged/rescored while the contest was frozen.'),
+                                         default=False)
 
     class Meta:
         verbose_name = _('contest submission')

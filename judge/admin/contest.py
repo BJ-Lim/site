@@ -11,7 +11,7 @@ from django.shortcuts import get_object_or_404
 from django.utils.translation import ugettext_lazy as _, ungettext
 from reversion.admin import VersionAdmin
 
-from judge.models import Contest, ContestProblem, Profile, Rating
+from judge.models import Contest, ContestProblem, ContestSubmission, Profile, Rating
 from judge.ratings import rate_contest
 from judge.widgets import HeavySelect2Widget, HeavySelect2MultipleWidget, AdminPagedownWidget, Select2MultipleWidget, \
     HeavyPreviewAdminPageDownWidget, Select2Widget
@@ -103,15 +103,18 @@ class ContestForm(ModelForm):
 
 class ContestAdmin(VersionAdmin):
     fieldsets = (
-        (None, {'fields': ('key', 'name', 'organizers', 'is_public', 'use_clarifications',
-                           'hide_problem_tags', 'hide_scoreboard', 'run_pretests_only')}),
-        (_('Scheduling'), {'fields': ('start_time', 'end_time', 'time_limit')}),
-        (_('Details'), {'fields': ('description', 'og_image', 'logo_override_image','tags', 'summary')}),
-        (_('Rating'), {'fields': ('is_rated', 'rate_all', 'rate_exclude')}),
-        (_('Organization'), {'fields': ('is_private', 'organizations', 'access_code')}),
-        (_('Justice'), {'fields': ('banned_users',)}),
+        (None,              {'fields': ('key', 'name', 'organizers')}),
+        (_('Settings'),     {'fields': ('is_public', 'use_clarifications', 'hide_problem_tags',
+                                        'freeze_submissions', 'hide_scoreboard', 'run_pretests_only', 'access_code')}),
+        (_('Bonuses'),      {'fields': ('time_bonus', 'first_submission_bonus')}),
+        (_('Scheduling'),   {'fields': ('start_time', 'end_time', 'time_limit')}),
+        (_('Details'),      {'fields': ('description', 'og_image', 'logo_override_image', 'tags', 'summary')}),
+        (_('Rating'),       {'fields': ('is_rated', 'rate_all', 'rate_exclude')}),
+        (_('Organization'), {'fields': ('is_private', 'organizations')}),
+        (_('Justice'),      {'fields': ('banned_users',)}),
     )
-    list_display = ('key', 'name', 'is_public', 'is_rated', 'start_time', 'end_time', 'time_limit', 'user_count')
+    list_display = ('key', 'name', 'is_public', 'is_rated', 'start_time', 'end_time',
+                    'time_limit', 'time_bonus', 'first_submission_bonus', 'user_count')
     actions = ['make_public', 'make_private']
     inlines = [ContestProblemInline]
     actions_on_top = True
@@ -130,6 +133,8 @@ class ContestAdmin(VersionAdmin):
 
     def get_readonly_fields(self, request, obj=None):
         readonly = []
+        if not request.user.has_perm('judge.contest_frozen_state') or (obj is not None and obj.freeze_submissions):
+            readonly += ['freeze_submissions']
         if not request.user.has_perm('judge.contest_rating'):
             readonly += ['is_rated', 'rate_all', 'rate_exclude']
         if not request.user.has_perm('judge.contest_access_code'):
@@ -160,7 +165,8 @@ class ContestAdmin(VersionAdmin):
     def get_urls(self):
         return [url(r'^rate/all/$', self.rate_all_view, name='judge_contest_rate_all'),
                 url(r'^(\d+)/rate/$', self.rate_view, name='judge_contest_rate'),
-                url(r'^(\d+)/judge/(\d+)/$', self.rejudge_view, name='judge_contest_rejudge')] + super(ContestAdmin, self).get_urls()
+                url(r'^(\d+)/judge/(\d+)/$', self.rejudge_view, name='judge_contest_rejudge'),
+                url(r'^(\d+)/unfreeze/$', self.unfreeze_view, name='judge_contest_unfreeze')] + super(ContestAdmin, self).get_urls()
 
     def rejudge_view(self, request, contest_id, problem_id):
         if not request.user.has_perm('judge.rejudge_submission'):
@@ -182,6 +188,19 @@ class ContestAdmin(VersionAdmin):
                                              '%d submissions were successfully scheduled for rejudging.',
                                              len(queryset)) % len(queryset))
         return HttpResponseRedirect(reverse('admin:judge_contest_change', args=(contest_id,)))
+
+    def unfreeze_view(self, request, id):
+        if not request.user.has_perm('judge.contest_frozen_state'):
+            raise PermissionDenied()
+        contest = get_object_or_404(Contest, id=id)
+        if not contest.freeze_submissions:
+            raise Http404()
+        with transaction.atomic():
+            contest.freeze_submissions = False
+            contest.save()
+            for submission in ContestSubmission.objects.filter(updated_frozen=True, participation__contest=contest):
+                submission.submission.recalculate_contest_submission()
+        return HttpResponseRedirect(reverse('admin:judge_contest_change', args=(id,)))
 
     def rate_all_view(self, request):
         if not request.user.has_perm('judge.contest_rating'):
