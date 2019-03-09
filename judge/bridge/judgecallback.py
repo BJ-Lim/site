@@ -233,7 +233,7 @@ class DjangoJudgeHandler(JudgeHandler):
         problem._updating_stats_only = True
         problem.update_stats()
 
-        submission.recalulate_contest_submission()
+        submission.recalculate_contest_submission()
 
         finished_submission(submission)
 
