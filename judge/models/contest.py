@@ -3,7 +3,7 @@ from operator import itemgetter
 from django.core.exceptions import ValidationError
 from django.core.urlresolvers import reverse
 from django.core.validators import MinValueValidator, RegexValidator
-from django.db import models
+from django.db import connection, models
 from django.db.models import Max, F, Q
 from django.utils import timezone
 from django.utils.functional import cached_property
@@ -222,9 +222,24 @@ class ContestParticipation(models.Model):
                                   help_text=_('0 means non-virtual, otherwise the n-th virtual participation'))
 
     def recalculate_score(self):
-        from django.db.models import F, FloatField
-        values = self.submissions.values('submission__problem').annotate(total=Max(F('points')+F('bonus'), output_field=FloatField()))
-        self.score = sum(map(itemgetter('total'), values))
+        with connection.cursor() as cursor:
+            cursor.execute('''
+                SELECT (
+                    SELECT MAX(ccs.points+ccs.bonus)
+                    FROM judge_contestsubmission ccs LEFT OUTER JOIN
+                         judge_submission csub ON (csub.id = ccs.submission_id)
+                    WHERE ccs.problem_id = cp.id AND ccs.participation_id = %s AND csub.date = MAX(sub.date)
+                ) AS `last`
+                FROM judge_contestproblem cp INNER JOIN
+                     judge_contestsubmission cs ON (cs.problem_id = cp.id AND cs.participation_id = %s) LEFT OUTER JOIN
+                     judge_submission sub ON (sub.id = cs.submission_id)
+                GROUP BY cp.id
+            ''', (self.id, self.id))
+            scores = cursor.fetchone()
+            if scores:
+                self.score = scores[0]
+            else:
+                self.scores = 0
         self.save()
         return self.score
 
@@ -275,10 +290,10 @@ class ContestParticipation(models.Model):
         cumtime = 0
         for problem in self.contest.contest_problems.all():
             solution = problem.submissions.filter(participation=self, points__gt=0) \
-                                          .annotate(best=Max('points')).filter(points=F('best')).aggregate(time=Max('submission__date'))
+                .values('submission__user_id').annotate(time=Max('submission__date'))
             if not solution:
                 continue
-            dt = solution['time'] - self.start
+            dt = solution[0]['time'] - self.start
             cumtime += dt.total_seconds()
         self.cumtime = cumtime
         self.save()
