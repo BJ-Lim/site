@@ -4,6 +4,7 @@ import os
 import time
 
 from django import db
+from django.db import F
 from django.utils import timezone
 
 from judge import event_poster as event
@@ -58,10 +59,16 @@ class DjangoJudgeHandler(JudgeHandler):
         _ensure_connection()  # We are called from the django-facing daemon thread. Guess what happens.
 
         try:
-            pid, time, memory, short_circuit, lid, is_pretested = (
+            pid, time, memory, short_circuit, lid, is_pretested, part, date = (
                 Submission.objects.filter(id=submission)
                           .values_list('problem__id', 'problem__time_limit', 'problem__memory_limit',
-                                       'problem__short_circuit', 'language__id', 'is_pretested')).get()
+                                       'problem__short_circuit', 'language__id', 'is_pretested',
+                                       'contest__participation', 'date')).get()
+
+            sub_number = 0
+            if part is not None:
+                # submission is from a contest
+                sub_number = Submission.objects.filter(contest__participation=part, date__lte=date).count()
         except Submission.DoesNotExist:
             logger.error('Submission vanished: %d', submission)
             json_log.error(self._make_json_log(
@@ -75,7 +82,7 @@ class DjangoJudgeHandler(JudgeHandler):
                                          .values_list('time_limit', 'memory_limit').get())
         except LanguageLimit.DoesNotExist:
             pass
-        return time, memory, short_circuit, is_pretested
+        return time, memory, short_circuit, is_pretested, sub_number
 
     def _authenticate(self, id, key):
         result = Judge.objects.filter(name=id, auth_key=key, is_blocked=False).exists()
